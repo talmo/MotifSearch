@@ -9,8 +9,11 @@ FORMAT_GENBANK = 2
 FORMAT_CSV = 3
 SCORING_PSSM = 0
 SCORING_INFORMATION_SCORE = 1
+SCORING_WEIGHTED_INFORMATION_SCORE = 2
+SCORING_BVH = 3
 STRAND_ORIGINAL = 0
 STRAND_COMPLEMENT = 1
+SCORING_STRINGS = ["PSSM", "Information Scoring", "Weighted Information Scoring", "Berg and von Hippel"]
 Kb = 0.0019872041  # Units: kcal/mol/K; Boltzmann constant; from http://physics.nist.gov/cuu/Constants/index.html
 
 
@@ -57,6 +60,12 @@ def wc(sequence):
     return ''.join([{"A": "T", "C": "G", "T": "A", "G": "C"}[base] for base in sequence[::-1]])
 
 
+def PSCM(sequences, width):
+    """Retuns the count of each base at each position.
+    Width is the length of the shortest sequence at most and at minimum 1."""
+    return [{base: "".join([seq[i] for seq in sequences]).count(base) for base in "ACTG"} for i in range(width)]
+
+
 def PSFM(sequences, width):
     """Accepts a list of strings. Width is the length of the strings; they should all be the same length
     or width should specify the minimum length"""
@@ -76,9 +85,16 @@ def information_score_matrix(motif_PSFM, genomic_entropy):
         for i in range(len(motif_PSFM))]
 
 
+def weighted_information_score_matrix(motif_PSFM, genomic_entropy):
+    return [{base: log2(motif_PSFM[i][base]) * (genomic_entropy + sum([motif_PSFM[i][b] * log2(motif_PSFM[i][b]) for b in "ACTG"])) + genomic_entropy
+        for base in "ACTG"} for i in range(len(motif_PSFM))]
+
+
 def scorer(sequence, method=SCORING_PSSM, **kwargs):
-    if method is SCORING_PSSM or method is SCORING_INFORMATION_SCORE:
-        return sum([kwargs["matrix"][i][base] for i, base in enumerate(sequence)])
+    return sum([kwargs["matrix"][i][base] for i, base in enumerate(sequence)])
+    #if method is SCORING_PSSM or method is SCORING_INFORMATION_SCORE or method is SCORING_WEIGHTED_INFORMATION_SCORE:
+    #elif method is SCORING_BVH:
+    #    return berg_von_hippel(sequence, kwargs["PSCM"])
 
 
 def sliding_window(sequence, width, step=1):
@@ -88,57 +104,30 @@ def sliding_window(sequence, width, step=1):
         yield position, sequence[position: position + width]
 
 
-def consensus(motif_PSFM):
-    """Returns a string containing to consensus sequence given a frequency matrix"""
-    return "".join([max(position, key=position.get) for position in motif_PSFM])
+def consensus(matrix):
+    """Returns a string containing to consensus sequence given a frequency or count matrix"""
+    return "".join([max(position, key=position.get) for position in matrix])
 
 
-def binding_energy(sequence, motif_PSFM, genomic_frequencies):
-    """Calculates the Maxwell-Boltzmann statistics for TF binding energy as derived by Berg and von Hippel"""
-    consensus_seq = consensus(motif_PSFM)
-    # Maxwell-Boltzmann binding energy (for a single TF molecule):
-    #   E = ln(freq(base, motif) * freq(consensus_base, genome)) - ln(freq(consensus_base, motif) * freq(base, genome))
-    #   See: Berg and von Hippel (1987), Roider et al. (2006)
-    return sum([math.log((motif_PSFM[i][base] * genomic_frequencies[consensus_seq[i]]) /
-        (motif_PSFM[i][consensus_seq[i]] * genomic_frequencies[base])) for i, base in enumerate(sequence)])
+def berg_von_hippel_matrix(motif_PSCM):
+    """Returns a scoring matrix based on the Berg and von Hippel method of site scoring
+    to be used for calculation of binding energy and probability."""
+    cons_seq = consensus(motif_PSCM)
+    return [{base: math.log((motif_PSCM[i][base] + 0.5) / (motif_PSCM[i][cons_seq[i]] + 0.5)) for base in "ACTG"}
+        for i in range(len(motif_PSCM))]
 
 
-def Z(motif_sequences, motif_PSFM, genomic_frequencies, beta):
-    """Use with binding_probability()
-    - beta = 1 / (Kb * temperature) WITH TEMPERATURE IN KELVIN!!"""
-    #print "E[0]:", binding_energy(motif_sequences[0], motif_PSFM, genomic_frequencies)
-    #print "-beta * E[0]:", -beta * binding_energy(motif_sequences[0], motif_PSFM, genomic_frequencies)
-    #print math.e ** (-beta * binding_energy(motif_sequences[0], motif_PSFM, genomic_frequencies))
-    # Z = sum(e ^ (-beta * Ei)) where Ei is the binding energy for each sequence in the motif
-    return sum([math.e ** (-beta * binding_energy(sequence, motif_PSFM, genomic_frequencies)) for sequence in motif_sequences])
+def linear_scale(values, worst, best, worst_unscaled):
+    #print "worst =", worst
+    #print "best =", best
+    #print "worst_unscaled =", worst_unscaled
+    return [((worst - best) / worst_unscaled) * value + best for value in values]
 
 
-def binding_probability(energy, beta, z):
-    """Calculates the probability of binding given a binding energy.
-    - binding_energy should be calculated for the sequence (Maxwell-Boltzmann or Fermi-Dirac)
-    - Z comes from the Z() function
-    - beta = 1 / (Kb * temperature) WITH TEMPERATURE IN KELVIN!!"""
-    # P(E) = e ^ (-beta * E) / Z
-    #print "e =", math.e
-    #print "beta =", beta
-    #print "E =",energy
-    #print "Z =", z
-    return math.e ** (-beta * energy) / z
-
-
-def energy_weighted_PSFM(motif_sequences, temperature, genomic_frequencies, motif_PSFM, width):
-    """Generates a PSFM weighted by binding energy by multiplying the count of each
-    base in each sequence by the binding probability of that base at that position"""
-    size = float(len(motif_sequences))
-    beta = 1 / (Kb * temperature)
-    z = Z(motif_sequences, motif_PSFM, genomic_frequencies, beta)
-    frequency_matrix = [{base: 0 for base in "ACTG"}] * width
-    for sequence in motif_sequences:
-        energy = binding_energy(sequence, motif_PSFM, genomic_frequencies)
-        p = binding_probability(energy, beta, z)
-        for i, base in enumerate(sequence):
-            frequency_matrix[i][base] += p  # Where the magic happens
-    return frequency_matrix
+def binding_probability(sequence, binding_energy, genome_total_energy, beta):
+    """Returns a probability given the binding energy of a site, the binding energies for every site in the genome
+    and the beta value, where binding energy is the scaled Berg and von Hippel site score."""
+    return math.e ** (-beta * binding_energy) / genome_total_energy
 
 
 # Classes
@@ -230,63 +219,3 @@ class SequenceCollection:
 
 
 # TODO: class ESA
-
-
-genome = Genome("../TFBSDB/genomes/NC_000913.fna", FORMAT_FASTA)  # E. coli
-motif = SequenceCollection("crp.prodoric.txt", format=FORMAT_PLAIN)  # crp
-scoring_method = SCORING_INFORMATION_SCORE
-weigh_by_binding_energy = True
-temperature = 310  # Kelvin, E. coli optimally grows at 37 C = 310 K
-iteration_cutoff = 100
-
-converged = False
-iteration = 0
-while not converged:
-    # Frequency matrices
-    frequency_matrix = PSFM(motif.sequences, motif.width)
-    wc_frequency_matrix = PSFM(motif.wc_sequences, motif.width)
-    # Re-calculate frequencies using binding energy
-    if weigh_by_binding_energy:
-        frequency_matrix = energy_weighted_PSFM(motif.sequences, temperature, genome.frequencies, frequency_matrix, motif.width)
-        wc_frequency_matrix = energy_weighted_PSFM(motif.wc_sequences, temperature, genome.frequencies, wc_frequency_matrix, motif.width)
-
-    # Scoring matrices
-    if scoring_method is SCORING_PSSM:
-        scoring_matrix = PSSM(frequency_matrix, genome.frequencies)
-        wc_scoring_matrix = PSSM(wc_frequency_matrix, genome.frequencies)
-    elif scoring_method is SCORING_INFORMATION_SCORE:
-        scoring_matrix = information_score_matrix(frequency_matrix, genome.entropy)
-        wc_scoring_matrix = information_score_matrix(wc_frequency_matrix, genome.entropy)
-
-    # Score the initial motif in case it isn't already; this is not 100% necessary by the way
-    if not motif.scored:
-        for i, item in enumerate(motif.collection):
-            score = scorer(item["sequence"], scoring_method, matrix=scoring_matrix)
-            wc_score = scorer(item["sequence"], scoring_method, matrix=wc_scoring_matrix)
-            motif.collection[i]["score"] = score if score > wc_score else wc_score
-            motif.scored = True
-
-    # Initialize iteration variables
-    window_generator = sliding_window(genome.sequence, motif.width)
-    genome_scores = []
-    strandedness = []
-
-    # Calculate the score for every position in the genome
-    for position, sequence in window_generator:
-        score = scorer(sequence, scoring_method, matrix=scoring_matrix)
-        wc_score = scorer(sequence, scoring_method, matrix=wc_scoring_matrix)
-        genome_scores.append(score if score > wc_score else wc_score)
-        strandedness.append(STRAND_ORIGINAL if score > wc_score else STRAND_COMPLEMENT)  # Stores which strand the score corresponds to
-
-    # Sort the scores
-    sorted_genome_scores = sorted([[position, score] for position, score in enumerate(genome_scores)], key=lambda site: site[1], reverse=True)
-    # Get the top k scores
-    top_k = sorted_genome_scores[:len(motif.collection)]
-    # Check for convergence
-    if [site[0] for site in top_k] in [item["position"] for item in motif.collection] or iteration >= iteration_cutoff:
-        converged = True
-    # Logging
-    print "\n".join([",".join([str(iteration), site["sequence"], str(site["position"]), str(site["score"])]) for site in motif.collection])
-    # Update the motif and iterate
-    motif = SequenceCollection([genome.sequence[site[0]:site[0] + motif.width] if strandedness[site[0]] is STRAND_ORIGINAL else wc(genome.sequence[site[0]:site[0] + motif.width]) for site in top_k], position=[site[0] for site in top_k], score=[site[1] for site in top_k], strand=[strandedness[site[0]] for site in top_k])
-    iteration += 1
