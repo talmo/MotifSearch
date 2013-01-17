@@ -1,12 +1,14 @@
-from bisect import bisect
 import csv
 import time
+import sys
+from bisect import bisect
 from MotifSearch import *
 
 
 genome = Genome("../TFBSDB/genomes/NC_000913.fna", FORMAT_FASTA)  # E. coli
-motif = SequenceCollection("crp.prodoric.txt", format=FORMAT_PLAIN)  # crp
-data_file = "data/k12_crp_BvH.csv"
+#motif = SequenceCollection("crp.prodoric.txt", format=FORMAT_PLAIN)  # CRP
+motif = SequenceCollection("lexa.prodoric.txt", format=FORMAT_PLAIN)  # LexA
+data_file = "data/data_BvH.csv" if len(sys.argv) < 2 else sys.argv[1]
 scoring_method = SCORING_BVH
 temperature = 310  # Kelvin
 iteration_cutoff = 100
@@ -27,7 +29,6 @@ scoring_matrix = berg_von_hippel_matrix(count_matrix)
 
 # This is needed to calculate the linear scaling parameters
 motif_scores = [scorer(sequence, method=SCORING_BVH, matrix=scoring_matrix) for sequence in motif.sequences]
-print "Consensus: %s | Initial motif." % consensus(count_matrix)
 
 # Simulation variables
 converged = False
@@ -47,17 +48,19 @@ while not converged:
 
     # Calculate binding probabilities for each site
     genome_probabilities = [binding_probability(sequence, scaled_genome_scores[i], total_genome_energy, beta) for i, sequence in all_n_mers]
-    
+
+    # Write out the original motif's scores to a CSV file
+    if iteration == 0:
+        scaled_motif_scores = linear_scale(motif_scores, -0.05, -2 * Kb * temperature * motif.width, min(motif_scores))
+        motif_probabilities = [binding_probability(sequence, scaled_motif_scores[i], total_genome_energy, beta) for i, sequence in enumerate(motif.sequences)]
+        print "Consensus: %s | Initial motif. | Probability Sum: %.4f" % (consensus(count_matrix), sum(motif_probabilities))
+        with open(data_file, "ab") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerows([[iteration, sequence, None, probability] for probability, sequence in zip(motif_probabilities, motif.sequences)])
+
     # Iterate by re-calculating the PSCM using probabilities
     count_matrix = weighted_PSCM(all_n_mers, motif.width, genome_probabilities)
     scoring_matrix = berg_von_hippel_matrix(count_matrix)
-    
-    # Write out the original motif's scores to a CSV file
-    if iteration == 0:
-        with open(data_file, "ab") as csv_file:
-            writer = csv.writer(csv_file)
-            scaled_motif_scores = linear_scale(motif_scores, -0.05, -2 * Kb * temperature * motif.width, min(motif_scores))
-            writer.writerows([[iteration, sequence, None, probability] for sequence, probability in zip(motif.sequences, [binding_probability(sequence, scaled_motif_scores[i], total_genome_energy, beta) for i, sequence in motif.sequences])])
 
     # Get the top k sites
     top_sites = [None] * motif.collection_size
@@ -76,7 +79,7 @@ while not converged:
         writer.writerows([[iteration + 1, sequence, position, probability] for (position, sequence), probability in zip(reversed(top_sites), reversed(top_sites_probs))])
 
     # Output status of run to console
-    print "Iteration: %3d | Consensus: %s | Done in %.2f secs." % (consensus(count_matrix), iteration + 1, time.time() - b)
+    print "Iteration: %3d | Consensus: %s | Probability Sum: %.4f | Done in %.2f secs." % (iteration + 1, consensus(count_matrix), sum(top_sites_probs), time.time() - b)
     if iteration == iteration_cutoff:
         converged = True
     iteration += 1

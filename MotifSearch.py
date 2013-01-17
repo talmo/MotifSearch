@@ -104,9 +104,6 @@ def weighted_information_score_matrix(motif_PSFM, genomic_entropy):
 
 def scorer(sequence, method=SCORING_PSSM, **kwargs):
     return sum([kwargs["matrix"][i][base] for i, base in enumerate(sequence)])
-    #if method is SCORING_PSSM or method is SCORING_INFORMATION_SCORE or method is SCORING_WEIGHTED_INFORMATION_SCORE:
-    #elif method is SCORING_BVH:
-    #    return berg_von_hippel(sequence, kwargs["PSCM"])
 
 
 def sliding_window(sequence, width, step=1):
@@ -130,9 +127,6 @@ def berg_von_hippel_matrix(motif_PSCM):
 
 
 def linear_scale(values, worst, best, worst_unscaled):
-    #print "worst =", worst
-    #print "best =", best
-    #print "worst_unscaled =", worst_unscaled
     return [((worst - best) / worst_unscaled) * value + best for value in values]
 
 
