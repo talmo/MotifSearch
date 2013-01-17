@@ -66,6 +66,18 @@ def PSCM(sequences, width):
     return [{base: "".join([seq[i] for seq in sequences]).count(base) for base in "ACTG"} for i in range(width)]
 
 
+def weighted_PSCM(sequence_pos, width, weights):
+    """Retuns the weighted count of each base at each position.
+    sequence_pos should be a list of (position, sequence) tuples.
+    Width is the length of the shortest sequence at most and at minimum 1.
+    Multiplies the counts for the n-th sequence with the n-th weight."""
+    count_matrix = [{base: 0 for base in "ACTG"} for i in range(width)]
+    for position, sequence in sequence_pos:
+        for i, base in enumerate(sequence):
+            count_matrix[i][base] += weights[position]
+    return count_matrix
+
+
 def PSFM(sequences, width):
     """Accepts a list of strings. Width is the length of the strings; they should all be the same length
     or width should specify the minimum length"""
@@ -127,7 +139,7 @@ def linear_scale(values, worst, best, worst_unscaled):
 def binding_probability(sequence, binding_energy, genome_total_energy, beta):
     """Returns a probability given the binding energy of a site, the binding energies for every site in the genome
     and the beta value, where binding energy is the scaled Berg and von Hippel site score."""
-    return math.e ** (-beta * binding_energy) / genome_total_energy
+    return math.exp(-beta * binding_energy) / genome_total_energy
 
 
 # Classes

@@ -1,3 +1,5 @@
+from bisect import bisect
+import csv
 import time
 from MotifSearch import *
 
@@ -14,32 +16,67 @@ print "Motif: %d sites, %dbp width" % (motif.collection_size, motif.width)
 print "Scoring:", SCORING_STRINGS[scoring_method]
 print "Data File:", data_file
 
+with open(data_file, "wb") as csv_file:
+    writer = csv.writer(csv_file)
+    writer.writerows([["Genome:", genome.name], ["Motif (#, width):", len(motif.collection), motif.collection_size, motif.width], ["Scoring:", SCORING_STRINGS[scoring_method]], ["Iteration", "Sequence", "Position", "Probability"]])
+
+beta = 1 / (Kb * temperature)
+# Initial matrices (updated every iteration)
 count_matrix = PSCM(motif.sequences, motif.width)
 scoring_matrix = berg_von_hippel_matrix(count_matrix)
 
+# This is needed to calculate the linear scaling parameters
 motif_scores = [scorer(sequence, method=SCORING_BVH, matrix=scoring_matrix) for sequence in motif.sequences]
-scaled_motif_scores = linear_scale(motif_scores, -0.05, -2 * Kb * temperature * motif.width, min(motif_scores))
-print "Motif Scores: best = %.2f, worst = %.2f" % (max(motif_scores), min(motif_scores))
-print "Motif Scaled: best = %.2f, worst = %.2f" % (min(scaled_motif_scores), max(scaled_motif_scores))
-beta = 1 / (Kb * temperature)
-print "Beta: %.2f" % beta
+print "Consensus: %s | Initial motif." % consensus(count_matrix)
 
+# Simulation variables
+converged = False
+iteration = 0
 window_generator = sliding_window(genome.sequence, motif.width)
-b = time.time()
-genome_scores = [scorer(window[1], method=SCORING_BVH, matrix=scoring_matrix) for window in window_generator]
-print "Genome Scores: best = %.2f, worst = %.2f (%.2f sec)" % (max(genome_scores), min(genome_scores), time.time() - b)
+all_n_mers = [(window[0], window[1]) for window in window_generator]  # Store all n-mers in the genome in a list of tuples (position, sequence)
+while not converged:
+    b = time.time()
+    # Calculate Berg and von Hippel scores
+    genome_scores = [scorer(sequence, method=SCORING_BVH, matrix=scoring_matrix) for i, sequence in all_n_mers]
 
-b = time.time()
-scaled_genome_scores = linear_scale(genome_scores, -0.05, -2 * Kb * temperature * motif.width, min(motif_scores))
-print "Genome Scaled: best = %.2f, worst = %.2f (%.2f sec)" % (min(scaled_genome_scores), max(scaled_genome_scores), time.time() - b)
+    # Scale scores to binding energies
+    scaled_genome_scores = linear_scale(genome_scores, -0.05, -2 * Kb * temperature * motif.width, min(motif_scores))
 
-b = time.time()
-total_genome_energy = sum([math.e ** (-beta * energy) for energy in scaled_genome_scores])
-print "Total genome energy: %d (%.2f sec)" % (total_genome_energy, time.time() - b)
+    # Partition function (Z)
+    total_genome_energy = sum([math.e ** (-beta * energy) for energy in scaled_genome_scores])
 
-b = time.time()
-motif_probabilities = [binding_probability(sequence, scaled_motif_scores[i], total_genome_energy, beta) for i, sequence in enumerate(motif.sequences)]
-window_generator = sliding_window(genome.sequence, motif.width)
-genome_probabilities = [binding_probability(sequence, scaled_genome_scores[i], total_genome_energy, beta) for i, sequence in window_generator]
-print "Motif Probabilities: best = %f, worst = %f (%.2f sec)" % (max(motif_probabilities), min(motif_probabilities), time.time() - b)
-print "Genome Probabilities: best = %f, worst = %f (%.2f sec)" % (max(genome_probabilities), min(genome_probabilities), time.time() - b)
+    # Calculate binding probabilities for each site
+    genome_probabilities = [binding_probability(sequence, scaled_genome_scores[i], total_genome_energy, beta) for i, sequence in all_n_mers]
+    
+    # Iterate by re-calculating the PSCM using probabilities
+    count_matrix = weighted_PSCM(all_n_mers, motif.width, genome_probabilities)
+    scoring_matrix = berg_von_hippel_matrix(count_matrix)
+    
+    # Write out the original motif's scores to a CSV file
+    if iteration == 0:
+        with open(data_file, "ab") as csv_file:
+            writer = csv.writer(csv_file)
+            scaled_motif_scores = linear_scale(motif_scores, -0.05, -2 * Kb * temperature * motif.width, min(motif_scores))
+            writer.writerows([[iteration, sequence, None, probability] for sequence, probability in zip(motif.sequences, [binding_probability(sequence, scaled_motif_scores[i], total_genome_energy, beta) for i, sequence in motif.sequences])])
+
+    # Get the top k sites
+    top_sites = [None] * motif.collection_size
+    top_sites_probs = [None] * motif.collection_size
+    for (position, site), probability in zip(all_n_mers, genome_probabilities):
+        if probability > min(top_sites_probs):
+            insert_pos = bisect(top_sites_probs, probability)
+            top_sites.insert(insert_pos, [position, site])
+            top_sites_probs.insert(insert_pos, probability)
+            top_sites.pop(0)
+            top_sites_probs.pop(0)
+
+    # Write out the top k sites to a CSV file
+    with open(data_file, "ab") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerows([[iteration + 1, sequence, position, probability] for (position, sequence), probability in zip(reversed(top_sites), reversed(top_sites_probs))])
+
+    # Output status of run to console
+    print "Iteration: %3d | Consensus: %s | Done in %.2f secs." % (consensus(count_matrix), iteration + 1, time.time() - b)
+    if iteration == iteration_cutoff:
+        converged = True
+    iteration += 1
