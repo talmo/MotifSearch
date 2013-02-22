@@ -1,20 +1,26 @@
 import math
 import re
 import time
+import heapq
+from collections import namedtuple
 
 # Constants
 FORMAT_PLAIN = 0
 FORMAT_FASTA = 1
 FORMAT_GENBANK = 2
 FORMAT_CSV = 3
+FORMAT_LIST = 4
+FORMAT_DICT = 5
+PROBABILITY_METHODS = {"boltzmann": "Boltzmann Probability", "fd": "Fermi-Dirac Probability"}
 SCORING_PSSM = 0
 SCORING_INFORMATION_SCORE = 1
 SCORING_WEIGHTED_INFORMATION_SCORE = 2
 SCORING_BVH = 3
+SCORING_METHODS = {"pssm": "PSSM", "is": "Information Scoring", "wis": "Weighted Information Scoring", "bvh": "Berg and von Hippel", "wbvh": "Weighted Berg and von Hippel"}
+SCORING_STRINGS = ["PSSM", "Information Scoring", "Weighted Information Scoring", "Berg and von Hippel"]
 STRAND_ORIGINAL = 0
 STRAND_COMPLEMENT = 1
-SCORING_STRINGS = ["PSSM", "Information Scoring", "Weighted Information Scoring", "Berg and von Hippel"]
-Kb = 0.0019872041  # Units: kcal/mol/K; Boltzmann constant; from http://physics.nist.gov/cuu/Constants/index.html
+kB = 0.0019872041  # Units: kcal/mol/K; Boltzmann constant; from http://physics.nist.gov/cuu/Constants/index.html
 
 
 # Functions
@@ -60,29 +66,42 @@ def wc(sequence):
     return ''.join([{"A": "T", "C": "G", "T": "A", "G": "C"}[base] for base in sequence[::-1]])
 
 
-def PSCM(sequences, width):
-    """Retuns the count of each base at each position.
-    Width is the length of the shortest sequence at most and at minimum 1."""
-    return [{base: "".join([seq[i] for seq in sequences]).count(base) for base in "ACTG"} for i in range(width)]
+def wc_matrix(matrix):
+    """Returns the reverse complement of a position-weight matrix."""
+    return [{"A": position["T"], "T": position["A"], "C": position["G"], "G": position["C"]} for position in matrix[::-1]]
 
 
-def weighted_PSCM(sequence_pos, width, weights):
-    """Retuns the weighted count of each base at each position.
-    sequence_pos should be a list of (position, sequence) tuples.
-    Width is the length of the shortest sequence at most and at minimum 1.
-    Multiplies the counts for the n-th sequence with the n-th weight."""
-    count_matrix = [{base: 0 for base in "ACTG"} for i in range(width)]
-    for position, sequence in sequence_pos:
-        for i, base in enumerate(sequence):
-            count_matrix[i][base] += weights[position]
+def PSCM(sequences, strand=STRAND_ORIGINAL):
+    """Returns the count of each base at each position.
+    If STRAND_COMPLEMENT is specified as the second parameter, the reverse-complement of each sequence in sequences is used.
+    The counts at position i is multiplied by weights[i] if it exists."""
+    width = len(sequences[0])
+    # Support for SequenceCollection instances
+    if isinstance(sequences, SequenceCollection):
+        collection = sequences
+        sequences = (site.sequence for site in collection)
+        width = len(collection[0].sequence)
+
+    # Initialize count matrix with zeroes
+    count_matrix = [{base: 0 for base in "ACTG"} for i in xrange(width)]
+    for sequence in sequences:
+        # Apply strandedness
+        if strand is STRAND_COMPLEMENT:
+            sequence = wc(sequence)
+        # Count
+        for position, base in enumerate(sequence):
+            count_matrix[position][base] += 1
+
     return count_matrix
 
 
-def PSFM(sequences, width):
-    """Accepts a list of strings. Width is the length of the strings; they should all be the same length
-    or width should specify the minimum length"""
-    size = float(len(sequences))
-    return [{base: ("".join([seq[i] for seq in sequences]).count(base) / size) for base in "ACTG"} for i in range(width)]
+def PSFM(count_matrix, total=-1):
+    """Accepts a PSCM (count matrix) which should be a list of dictionaries with the
+    counts for each base at each position.
+    Returns a matrix with the frequency of each base at each position."""
+    if total == -1:
+        total = sum(count_matrix[0].values())  # The total for any column should be the same
+    return [{base: float(count) / total for base, count in position.items()} for position in count_matrix]
 
 
 def PSSM(motif_PSFM, genomic_frequencies):
@@ -102,8 +121,21 @@ def weighted_information_score_matrix(motif_PSFM, genomic_entropy):
         for base in "ACTG"} for i in range(len(motif_PSFM))]
 
 
-def scorer(sequence, method=SCORING_PSSM, **kwargs):
-    return sum([kwargs["matrix"][i][base] for i, base in enumerate(sequence)])
+def create_scoring_matrix(method, genome, count_matrix, frequency_matrix):
+    """Returns the scoring matrix given a scoring method"""
+    if method in "pssm":
+        return PSSM(frequency_matrix, genome.frequencies)
+    elif method in "is":
+        return information_score_matrix(frequency_matrix, genome.entropy)
+    elif method in "bvh":
+        return berg_von_hippel_matrix(count_matrix)
+
+
+def score_sequence(sequence, matrix, matrix_wc):
+    """Returns the sum of the score in the matrix for the base at each position of the sequence."""
+    original = sum([matrix[i][base] for i, base in enumerate(sequence)])
+    reverse = sum([matrix_wc[i][base] for i, base in enumerate(sequence)])
+    return (original, STRAND_ORIGINAL) if original > reverse else (reverse, STRAND_COMPLEMENT)
 
 
 def sliding_window(sequence, width, step=1):
@@ -126,14 +158,94 @@ def berg_von_hippel_matrix(motif_PSCM):
         for i in range(len(motif_PSCM))]
 
 
-def linear_scale(values, worst, best, worst_unscaled):
-    return [((worst - best) / worst_unscaled) * value + best for value in values]
+def linear_scale(value, worst, best, worst_unscaled):
+    return ((worst - best) / worst_unscaled) * value + best
 
 
-def binding_probability(sequence, binding_energy, genome_total_energy, beta):
-    """Returns a probability given the binding energy of a site, the binding energies for every site in the genome
-    and the beta value, where binding energy is the scaled Berg and von Hippel site score."""
-    return math.exp(-beta * binding_energy) / genome_total_energy
+def energy_scale(method, score, **kwargs):
+    if method is SCORING_INFORMATION_SCORE:
+        m = ((2 * kB * kwargs["temperature"] * (2 - kwargs["width"])) / (kwargs["genomic_entropy"] * kwargs["width"]))
+        b = -4 * kB * kwargs["temperature"]
+        energy = m * score + b
+        return energy if score >= 0 else (-4 * kB * kwargs["temperature"])
+
+
+def TRAP(bvh_score, width):
+    """Returns a binding energy based on the TRAP model given a Berg and von Hippel score."""
+    # Parameters (see Manke 2008, Roider 2007)
+    lamb = 0.7
+    ln_R_0 = 0.585 * width - 5.66
+    # Return energy
+    return (1 / lamb) * bvh_score + ln_R_0
+
+def boltzmann_probability(binding_energy, Z, beta):
+    """Returns a binding probability given the binding energy of a site, the sum of the
+    binding energies for every site in the genome (Z) and the beta value, where binding
+    energy is the scaled Berg and von Hippel site score."""
+    return math.exp(-beta * binding_energy) / Z
+
+
+def fermi_dirac_probability(binding_energy, Z, beta, copy_number):
+    """Returns a binding probability given a binding energy of a site, beta, Z (total genome
+    binding energy), and copy number (number of TF molecules present). Keep in mind that this
+    based on an APPROXIMATION of mu."""
+    mu = (1 / beta) * (math.log(copy_number) - math.log(Z))
+    return 1 / (1 + math.exp(beta * (binding_energy - mu)))
+
+
+def kl(p, q):
+    """Calculates the Kullback-Leibler diverence for two distributions p and q.
+    This is essentially the information gain between two probability distributions."""
+    if max(p) > 1 or sum(p) > 1:
+        p = normalize(p)
+    if max(q) > 1 or sum(q) > 1:
+        q = normalize(q)
+
+    # Add pseudo-count to prevent division by 0 errors
+    for i in range(len(q)):
+        if q[i] == 0:
+            q[i] += 10E-50
+
+    return msum([log2(pi / qi) * pi for pi, qi in zip(p, q)])
+
+
+def normalize(distribution):
+    """Normalize the distribution to the range 0-1.0."""
+    total = msum(distribution)
+    return [p / total for p in distribution]
+
+
+def msum(iterable):
+    "Full precision summation using multiple floats for intermediate values"
+    # Rounded x+y stored in hi with the round-off stored in lo.  Together
+    # hi+lo are exactly equal to x+y.  The inner loop applies hi/lo summation
+    # to each partial so that the list of partial sums remains exact.
+    # Depends on IEEE-754 arithmetic guarantees.  See proof of correctness at:
+    # www-2.cs.cmu.edu/afs/cs/project/quake/public/papers/robust-arithmetic.ps
+    # More: http://code.activestate.com/recipes/393090/
+    partials = []               # sorted, non-overlapping partial sums
+    for x in iterable:
+        i = 0
+        for y in partials:
+            if abs(x) < abs(y):
+                x, y = y, x
+            hi = x + y
+            lo = y - (hi - x)
+            if lo:
+                partials[i] = lo
+                i += 1
+            x = hi
+        partials[i:] = [x]
+    return sum(partials, 0.0)
+
+
+def top_k_sites(k, sites, *kwargs):
+    """Returns the top sites of a collection. Pass key as a kwarg to sort by key."""
+    return heapq.nlargest(k, scores)
+
+
+def sigma(x, alpha, beta):
+    return 1 / (1 + math.exp(-(alpha - beta * x)))
 
 
 # Classes
@@ -145,6 +257,12 @@ class Genome:
     def __str__(self):
         """print genomeInstance will output the sequence of the instance of this class"""
         return self.sequence
+
+    def __len__(self):
+        return len(self.sequence)
+
+    def __getitem__(self, k):
+        return self.sequence.__getitem__(k)
 
     def load_file(self, filename, format=FORMAT_FASTA):
         """Formats accepted: FORMAT_FASTA, FORMAT_GENBANK, FORMAT_PLAIN"""
@@ -166,62 +284,155 @@ class Genome:
         self.entropy = -sum([f * log2(f) for f in self.frequencies.values()])
 
 
+SEQ_FIELDS = ["sequence", "position", "strand", "score", "energy", "probability"]
+Seq = namedtuple("Seq", SEQ_FIELDS)
+
+
 class SequenceCollection:
     """Provides methods for working with a collection, i.e. list of sequences in a genome,
     generally for working with a motif.
     Usage:
         Creating from file:
-            >>> motif = SequenceCollection("tf_binding_sites.txt", format=FORMAT_PLAIN)
+            >>> motif = SequenceCollection("tf_binding_sites.txt", FORMAT_PLAIN)
         Creating from list of strings:
             >>> motif = SequenceCollection(listOfSites)
         Accessing:
             >>> motif.collection[0]
             {"name": "SITE_001", "position": 186839, "score": 0, "regulon": "DevR", "sequence": "ACTGATCGTA"}
     """
-    metafields = ["name", "position", "sequence", "strand", "score", "regulon"]
 
-    def __init__(self, sequences, **kwargs):
-        """If no format is provided in the kwargs, it is assumed that sequences is a list of string sequences"""
-        if "format" in kwargs:
-            self.load_file(sequences, kwargs["format"])
+    def __init__(self, collection=[], format=FORMAT_LIST):
+        """If no format is provided, it is assumed that sequences is a list"""
+        if len(collection) > 0:
+            if format is FORMAT_LIST:
+                self.build_collection(collection)
+            elif format is FORMAT_DICT:
+                self.build_collection(collection)
+            else:
+                self.load_file(collection, format)
         else:
-            self.build_collection(sequences, **kwargs)
-        self.scored = False
+            self.collection = []
 
     def __str__(self):
-        return "\n".join(["%-8s %s %s" % (item["position"] if item["position"] is not None else "N/A", item["sequence"], item["score"]) for item in self.collection])
+        return "\n".join([" ".join([item for item in site]) for site in self.collection])
 
-    def load_file(self, filename, format=FORMAT_PLAIN):
-        """Formats accepted: FORMAT_FASTA, FORMAT_GENBANK, FORMAT_PLAIN"""
+    def __getitem__(self, k):
+        return self.collection.__getitem__(k)
+
+    def load_file(self, filename, format):
+        """Formats accepted: FORMAT_FASTA, FORMAT_PLAIN"""
         # FASTA: One name per line prefixed with ">"; one sequence per line
-        if format == FORMAT_FASTA:
+        if format is FORMAT_FASTA:
             FASTA = read_FASTA(filename)
-            self.build_collection(FASTA.keys(), name=FASTA.values())
+            self.build_collection([{"name": name, "sequence": sequence} for name, sequence in FASTA.items()])
         # Plain: One sequence per line
-        elif format == FORMAT_PLAIN:
+        elif format is FORMAT_PLAIN:
             sequences = read_plain(filename)
-            self.build_collection(sequences)
+            self.build_collection([[sequence] + [None] * (len(SEQ_FIELDS) - 1) for sequence in sequences])
         # TODO: CSV Parsing
 
-    def build_collection(self, sequences, **kwargs):
-        """Constructs the self.collection attribute with default value for the metafields if not provided in the arguments."""
-        self.collection_size = len(sequences)
-        self.width = min([len(seq) for seq in sequences])
-        self.collection = []
-        # For each sequence in sequences, construct a dictionary with the metafields including available data
-        for i, sequence in enumerate(sequences):
-            self.collection.append(dict({field: kwargs[field][i] if field in kwargs else None for field in SequenceCollection.metafields}.items() +
-                {"sequence": sequence}.items()))
-        # Adjust for strandedness
-        for i, item in enumerate(self.collection):
-            if item["strand"] is STRAND_COMPLEMENT:
-                self.collection[i]["sequence"] = wc(item["sequence"])
-        # For convenience: expose just the sequences
-        self.sequences = [item["sequence"] for item in self.collection]
-        self.wc_sequences = [wc(item["sequence"]) for item in self.collection]
+    def build_collection(self, collection):
+        """Sets the self.collection attribute and calculates additional information about the collection.
+        Important note on strandedness: The ["sequence"] attribute of each sequence must be the STRAND_ORIGINAL
+        version! Meaning, if the sequence is 3'-ACTG-5' and it is in the STRAND_COMPLEMENT, then on the actual
+        strand, the sequence would be 5'-TGAC-3'.
+        **Basically** Make sure to reverse complement any sequence that is on the other strand BEFORE it gets to
+        this function."""
+        self.collection = [Seq(*site) for site in collection]
+        self.size = len(self.collection)
+        self.width = len(self.collection[0].sequence)
+        self.stats = self.statistics()
 
-    def csv(self):
-        return ",".join(SequenceCollection.metafields) + "\n" + "\n".join([",".join([str(item[field]) if item[field] is not None else "" for field in item]) for item in self.collection])
+    def add(self, site):
+        """Converts a dictionary to a namedtuple and stores in the collection."""
+        # Populate all fields in case some of them don't exist
+        for field in SEQ_FIELDS:
+            try:
+                site[field]
+            except:
+                site[field] = None
+        self.collection.append(Seq(*[site[field] for field in SEQ_FIELDS]))
+
+    def update(self, i, site):
+        """Converts a dictionary to a namedtuple and replaces the element at i in the collection with it."""
+        # Populate all fields in case some of them don't exist
+        for field in SEQ_FIELDS:
+            try:
+                site[field]
+            except:
+                site[field] = getattr(self.collection[i], field)
+        self.collection[i] = Seq(*[site[field] for field in SEQ_FIELDS])
+
+    def statistics(self):
+        """Calculate some basic statistics on the quantifiable properties of the SequenceCollection."""
+        stats = {}
+        for category in ["score", "energy", "probability"]:
+            if getattr(self.collection[0], category) is not None:
+                stats[category] = {subcat: 0 for subcat in ["min", "max", "total", "mean"]}
+                stats[category]["min"] = min([getattr(site, category) for site in self.collection])
+                stats[category]["max"] = max([getattr(site, category) for site in self.collection])
+                stats[category]["total"] = sum([getattr(site, category) for site in self.collection])
+                stats[category]["mean"] = float(stats[category]["total"]) / self.size
+
+        # Save as instance variable
+        self.stats = stats
+        return stats
+
+    def top(self, k, sort_by="score"):
+        """Returns the top sites of a collection. sort_by should be the key to sort by, defaults to "score"."""
+        return heapq.nlargest(k, self.collection, lambda site: getattr(site, sort_by))
+
+    def collection_generator(self):
+        """A generator expression used to avoid loading large collection objects into memory."""
+        for i, site in enumerate(self.collection):
+            yield i, site
+
+    def sort(self, category, reverse=True):
+        """Sorts the collection by the specified category. Generally 'score' or 'probability'."""
+        self.collection.sort(reverse=reverse, key=lambda site: getattr(site, category))
+
+    def normalize(self, category):
+        """Normalizes the collection by the category specified so that the attribute of all sites add up to 1.0.
+        Generally used with 'probability'."""
+        total = sum([getattr(site, category) for site in self.collection])
+        for i, site in enumerate(self.collection):
+            self.update(i, {category: getattr(site, category) / total})
+
+    def truncate(self, prob_sum):
+        # Add the probability of the site to the total probability mass until the total is greater than prob_sum
+        total, i = 0, 0
+        for site in self.collection:
+            total += site.probability
+            if total > prob_sum:
+                break
+            i += 1
+        # Truncate the collection list
+        self.collection = self.collection[:i]
+        # Re-calculate statistics if they had been calculated before
+        if hasattr(self, "stats"):
+            self.statistics()
 
 
-# TODO: class ESA
+# Position entropy given binding
+# H(X|Y) = Hafter(l) = -sum(baseProbability * log_2(baseProbability)) for each base in position l
+def Hxy(motifPSFM):
+    entropies = []
+    for position in motifPSFM:
+        entropy = 0
+        for base_probability in position.itervalues():
+            entropy += base_probability * log2(base_probability)
+        entropies.append(-entropy)
+    return entropies
+
+
+# Motif Redundancy Index (information content/mutual information)
+# Returns RI per position
+# RI(l) = Hbefore(l) - Hafter(l) = genomeEntropy - motifEntropy(l)
+#   where the genomeEntropy is the same for every position (independent)
+def RI(genomeEntropy, motifEntropies):
+    positionalRIs = []
+    for positionEntropy in motifEntropies:
+        informationContent = genomeEntropy - positionEntropy
+        positionalRIs.append(informationContent)
+    # RI for motif is simply sum(positionalRIs)
+    return positionalRIs
