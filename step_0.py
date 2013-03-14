@@ -62,9 +62,9 @@ def run_iterations(genome, original_motif, **kwargs):
         debug("Iteration %d\n====================" % iterations)
         # Iterate with initial matrices if this is the first iteration
         if iterations == 0:
-            pscm, Z, iteration_prob_mass, iteration_energies = iterate(genome, initial_pscm, initial_scoring_matrix, copy_number)
+            pscm, Z, iteration_prob_mass = iterate(genome, initial_pscm, initial_scoring_matrix, copy_number)
         else:
-            pscm, Z, iteration_prob_mass, iteration_energies = iterate(genome, pscm, scoring_matrix, copy_number)
+            pscm, Z, iteration_prob_mass = iterate(genome, pscm, scoring_matrix, copy_number)
 
         # Add the PSCM, Z, and mean score to the lists that will be returned
         PSCMs.append(pscm)
@@ -95,7 +95,7 @@ def iterate(genome, pscm, scoring_matrix, copy_number):
     beta = 1 / (kB * temperature)
 
     # 1. Walk through the genome scoring each site and scaling to energy
-    scores, genome_energies, Z = get_scores_energies((sequence for pos, sequence in sliding_window(genome.sequence, width)),
+    scores, genome_energies, Z = get_scores_and_energies((sequence for pos, sequence in sliding_window(genome.sequence, width)),
         scoring_matrix, beta, temperature, width)
     mean_score = sum(scores) / len(scores)
     mean_energy = sum(genome_energies) / len(genome_energies)
@@ -121,16 +121,14 @@ def iterate(genome, pscm, scoring_matrix, copy_number):
             pscm[i][base] += p
         genome_probabilities.append(p)
 
-    #assert abs(1 - sum(genome_probabilities) / copy_number) < 0.05
     genome_prob_mass = sum(genome_probabilities)
     debug("Calculated probabilities and new PSCM. Genome Probability Mass: %g" % genome_prob_mass)
 
-    return pscm, Z, genome_energies, genome_prob_mass
+    return pscm, Z, genome_prob_mass
 
 
-def get_scores_energies(sequences, scoring_matrix, beta, temperature, width):
+def get_scores_and_energies(sequences, scoring_matrix, beta, temperature, width):
     """Return the scores and energies for a given list sequences as scored against a scoring matrix."""
-    method = SCORING_INFORMATION_SCORE
     scores = []
     energies = []
     Z = 0
@@ -139,7 +137,6 @@ def get_scores_energies(sequences, scoring_matrix, beta, temperature, width):
     for sequence in sequences:
         score, strand = score_sequence(sequence, scoring_matrix, scoring_matrix_wc)
         scores.append(score)
-        #energy = energy_scale(method, score, temperature=temperature, genomic_entropy=genome.entropy, width=width)
         energy = TRAP(score, width)
         energies.append(energy)
         Z += math.exp(-beta * energy)

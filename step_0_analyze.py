@@ -138,7 +138,6 @@ def plot_KLs(KLs, folder, filename, title):
 if __name__ == '__main__':
     args = parse_args()
     debug("Parsed arguments.")
-    #pickled_file = "NC_000913_lexa.prodoric_bvh_I1"
     pickled_file = args.pickled_file
     data = load_pickle(pickled_file)
     debug("Loaded pickled data.")
