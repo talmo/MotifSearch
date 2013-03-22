@@ -154,7 +154,7 @@ def berg_von_hippel_matrix(motif_PSCM):
     """Returns a scoring matrix based on the Berg and von Hippel method of site scoring
     to be used for calculation of binding energy and probability."""
     cons_seq = consensus(motif_PSCM)
-    return [{base: math.log((motif_PSCM[i][base] + 0.5) / (motif_PSCM[i][cons_seq[i]] + 0.5)) for base in "ACTG"}
+    return [{base: math.log((motif_PSCM[i][cons_seq[i]] + 0.5) / (motif_PSCM[i][base] + 0.5)) for base in "ACTG"}
         for i in range(len(motif_PSCM))]
 
 

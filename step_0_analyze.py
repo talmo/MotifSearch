@@ -71,7 +71,7 @@ def generate_logo(psfm, folder, filename, title):
     logo_options = LogoOptions(color_scheme=colorscheme.nucleotide, resolution=192, logo_title=title,
         title_fontsize=6)
     logo_format = LogoFormat(logo_data, logo_options)
-    logos_folder = "logos/%s" % folder
+    logos_folder = "figures/%s/logo" % folder
     # Create the folder if it does not exist
     if not os.path.exists(logos_folder):
         os.makedirs(logos_folder)
